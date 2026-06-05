@@ -1,5 +1,4 @@
 import { readFileSync } from "node:fs";
-import { join, normalize, relative } from "node:path";
 import type { INestApplication, LoggerService } from "@nestjs/common";
 import { type OpenAPIObject, SwaggerModule } from "@nestjs/swagger";
 import { parseSync } from "oxc-parser";
@@ -12,8 +11,6 @@ import { extractMethodDtos } from "./extractMethodDtos";
 import { extractParamDecoratorThrows } from "./extractParamDecoratorThrows";
 import { findControllerFiles } from "./findControllerFiles";
 import { getApiVersion } from "./getApiVersion";
-
-const TS_EXTENSION_REGEX = /\.ts$/;
 
 // ────────────────────────────────────────────────────────────
 // Helpers
@@ -249,27 +246,47 @@ export const pactify = async (
 
   logger.current.debug?.(`Found ${allDtos.size} unique DTO(s)`);
 
-  // ── Import DTO classes from compiled JS ──
+  // ── Import HTTP status DTOs from ts-exc for extraModels ──
+  // Only load DTOs that pactify actually discovered in controller methods.
+  // These are needed so $ref: "#/components/schemas/OkDto" resolves.
   const dtoClasses: Array<new (...args: Array<unknown>) => unknown> = [];
-
-  for (const [, info] of allDtos) {
-    try {
-      const relativePath = relative(process.cwd(), info.filePath);
-      const jsFilePath = join(process.cwd(), "dist", relativePath).replace(
-        TS_EXTENSION_REGEX,
-        ".js",
-      );
-      const normalizedPath = normalize(jsFilePath);
-      // eslint-disable-next-line @typescript-eslint/no-require-imports
-      const mod = require(normalizedPath);
-      if (mod[info.className]) {
-        dtoClasses.push(mod[info.className]);
+  try {
+    const consumerRequire = require("module").createRequire(
+      require("node:path").resolve(process.cwd(), "package.json"),
+    );
+    const tsExc = consumerRequire("@esmaeel_emadi/ts-exc");
+    // Only add plain success DTOs (OkDto, CreatedDto, etc.) to extraModels.
+    // Error DTOs (NotFoundDto, BadRequestDto, etc.) extend HttpException and
+    // cause circular dependency conflicts with NestJS's own HttpException.
+    // Success DTOs don't extend anything — they're safe.
+    const httpExClass = (tsExc as Record<string, unknown>).HttpException;
+    const httpExPrototype =
+      typeof httpExClass === "function"
+        ? (httpExClass as new (...a: unknown[]) => unknown).prototype
+        : null;
+    const added = new Set<string>();
+    for (const [, info] of allDtos) {
+      const cls = (tsExc as Record<string, unknown>)[info.className];
+      if (
+        typeof cls === "function" &&
+        !added.has(info.className) &&
+        // Skip error DTOs that extend HttpException
+        !(
+          httpExPrototype &&
+          Object.prototype.isPrototypeOf.call(
+            httpExPrototype,
+            (cls as new (...a: unknown[]) => unknown).prototype,
+          )
+        )
+      ) {
+        added.add(info.className);
+        dtoClasses.push(cls as new (...args: Array<unknown>) => unknown);
       }
-    } catch (e) {
-      logger.current.warn?.(
-        `Failed to import ${info.className} from ${info.filePath}: ${e}`,
-      );
     }
+  } catch {
+    logger.current.warn?.(
+      "@esmaeel_emadi/ts-exc not found — install it for full Swagger schema support",
+    );
   }
 
   // ── Create base Swagger document ──
@@ -281,15 +298,12 @@ export const pactify = async (
   const filteredPaths: Record<string, unknown> = {};
 
   for (const [path, pathItem] of Object.entries(doc.paths)) {
-    if (path.startsWith(`/${basePath}/v`)) {
+    if (path.startsWith(`/${basePath}`)) {
       filteredPaths[path] = pathItem;
     }
   }
   // biome-ignore lint/suspicious/noExplicitAny: OpenAPI PathsObject type
   doc.paths = filteredPaths as any;
-
-  // Remove the "default" tag
-  doc.tags = doc.tags?.filter((tag) => tag.name !== "default") || [];
 
   // ── Add extracted DTOs to each path+method ──
   for (const methodInfo of pathMethods) {

@@ -75,32 +75,13 @@ export const extractDecoratorThrows = (
             ) {
               let path = "";
 
-              if (node.source.value.startsWith("@")) {
-                continue;
+              const resolved = resolveAliasPath(
+                node.source.value,
+                sourceFilePath,
+              );
+              if (resolved) {
+                dtoImports.set(spec.imported.name, resolved);
               }
-              if (node.source.value.startsWith("~")) {
-                const aliasPath = node.source.value.replace(/^~/, "src/");
-                path = resolve(
-                  process.cwd(),
-                  aliasPath.endsWith(".ts") ? aliasPath : `${aliasPath}.ts`,
-                );
-              } else if (node.source.value.startsWith("src/")) {
-                path = resolve(
-                  process.cwd(),
-                  node.source.value.endsWith(".ts")
-                    ? node.source.value
-                    : `${node.source.value}.ts`,
-                );
-              } else {
-                path = resolve(
-                  dirname(sourceFilePath),
-                  node.source.value.endsWith(".ts")
-                    ? node.source.value
-                    : `${node.source.value}.ts`,
-                );
-              }
-
-              dtoImports.set(spec.imported.name, path);
             }
           }
         }

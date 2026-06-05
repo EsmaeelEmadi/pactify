@@ -1,35 +1,18 @@
 import { readFileSync } from "node:fs";
-import { dirname, resolve } from "node:path";
 import { parseSync } from "oxc-parser";
 import { walk } from "oxc-walker";
+import { resolveAliasPath } from "./pathResolver";
 
 // ────────────────────────────────────────────────────────────
-// Resolve an import path to an absolute file path.
+// Resolve an import path using TypeScript module resolution.
 // ────────────────────────────────────────────────────────────
 
 const resolveImportPath = (
   importPath: string,
   sourceFilePath: string,
-): string => {
-  if (importPath.startsWith("~")) {
-    const aliasPath = importPath.replace(/^~/, "src/");
-    return resolve(
-      process.cwd(),
-      aliasPath.endsWith(".ts") ? aliasPath : `${aliasPath}.ts`,
-    );
-  }
-
-  if (importPath.startsWith("src/")) {
-    return resolve(
-      process.cwd(),
-      importPath.endsWith(".ts") ? importPath : `${importPath}.ts`,
-    );
-  }
-
-  return resolve(
-    dirname(sourceFilePath),
-    importPath.endsWith(".ts") ? importPath : `${importPath}.ts`,
-  );
+): string | null => {
+  const resolved = resolveAliasPath(importPath, sourceFilePath);
+  return resolved ?? null;
 };
 
 // ────────────────────────────────────────────────────────────
