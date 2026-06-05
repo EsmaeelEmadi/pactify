@@ -1,6 +1,6 @@
 {
   "name": "@esmaeel_emadi/pactify",
-  "version": "0.2.0",
+  "version": "0.2.1",
   "description": "AST-powered Swagger/OpenAPI auto-generation for NestJS controllers. Parses TypeScript source to extract DTOs, response types, and error types — no manual @ApiResponse decorators needed.",
   "license": "MIT",
   "author": "emadi68moh@gmail.com",
@@ -15,7 +15,8 @@
       "import": "./dist/index.js",
       "require": "./dist/index.js",
       "types": "./dist/index.d.ts"
-    }
+    },
+    "./*": "./dist/*"
   },
   "files": [
     "dist"
