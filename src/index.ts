@@ -246,31 +246,42 @@ export const pactify = async (
 
   logger.current.debug?.(`Found ${allDtos.size} unique DTO(s)`);
 
-  // ── Import HTTP status DTOs from ts-exc for extraModels ──
-  // Only load DTOs that pactify actually discovered in controller methods.
-  // These are needed so $ref: "#/components/schemas/OkDto" resolves.
+  // ── Import HTTP status DTOs from ts-exc ──
+  // Success DTOs (OkDto, CreatedDto, etc.) go to extraModels.
+  // Error DTOs (NotFoundDto, BadRequestDto, etc.) extend HttpException and
+  // cause circular dependency conflicts with NestJS Swagger's schema factory
+  // — their schemas are registered manually after createDocument().
   const dtoClasses: Array<new (...args: Array<unknown>) => unknown> = [];
+  let tsExc: Record<string, unknown> | null = null;
+
+  // Create a require function that resolves from the consumer project
+  const consumerRequire = require("module").createRequire(
+    require("node:path").resolve(process.cwd(), "package.json"),
+  );
+
   try {
-    const consumerRequire = require("module").createRequire(
-      require("node:path").resolve(process.cwd(), "package.json"),
+    tsExc = consumerRequire("@esmaeel_emadi/ts-exc") as Record<string, unknown>;
+  } catch {
+    logger.current.warn?.(
+      "@esmaeel_emadi/ts-exc not found — install it for full Swagger schema support",
     );
-    const tsExc = consumerRequire("@esmaeel_emadi/ts-exc");
-    // Only add plain success DTOs (OkDto, CreatedDto, etc.) to extraModels.
-    // Error DTOs (NotFoundDto, BadRequestDto, etc.) extend HttpException and
-    // cause circular dependency conflicts with NestJS's own HttpException.
-    // Success DTOs don't extend anything — they're safe.
-    const httpExClass = (tsExc as Record<string, unknown>).HttpException;
+  }
+
+  const added = new Set<string>();
+
+  // ── Resolve from ts-exc first (wrapper DTOs + error DTOs) ──
+  if (tsExc) {
+    const httpExClass = tsExc.HttpException;
     const httpExPrototype =
       typeof httpExClass === "function"
         ? (httpExClass as new (...a: unknown[]) => unknown).prototype
         : null;
-    const added = new Set<string>();
     for (const [, info] of allDtos) {
-      const cls = (tsExc as Record<string, unknown>)[info.className];
+      const cls = tsExc[info.className];
       if (
         typeof cls === "function" &&
         !added.has(info.className) &&
-        // Skip error DTOs that extend HttpException
+        // Skip error DTOs that extend HttpException (registered manually)
         !(
           httpExPrototype &&
           Object.prototype.isPrototypeOf.call(
@@ -283,16 +294,182 @@ export const pactify = async (
         dtoClasses.push(cls as new (...args: Array<unknown>) => unknown);
       }
     }
-  } catch {
-    logger.current.warn?.(
-      "@esmaeel_emadi/ts-exc not found — install it for full Swagger schema support",
+  }
+
+  // ── Resolve application DTOs from their source files ──
+  // DTOs like LoginResponseDto, PaginatedUsersDto are defined
+  // in the project, not in ts-exc. Use the filePath collected
+  // during AST parsing to require them directly.
+
+  const debugLog: string[] = [];
+  debugLog.push(`=== pactify DTO resolution ===`);
+  debugLog.push(`allDtos count: ${allDtos.size}`);
+  for (const [key, info] of allDtos) {
+    debugLog.push(
+      `  allDtos[${key}]: className=${info.className} filePath=${info.filePath}`,
     );
+  }
+  debugLog.push(`resolved from ts-exc: ${[...added].join(", ")}`);
+
+  for (const [, info] of allDtos) {
+    if (added.has(info.className)) continue;
+    // Only process project-local DTOs (relative paths), skip
+    // ts-exc .d.ts paths and node_modules paths
+    if (
+      info.filePath.includes("node_modules") ||
+      info.filePath.endsWith(".d.ts")
+    ) {
+      continue;
+    }
+    try {
+      // Application DTOs: resolve from the compiled dist/ directory.
+      // In production the backend runs from dist/, not src/.
+      const srcPath = require("node:path").resolve(
+        process.cwd(),
+        info.filePath,
+      );
+      // Try compiled .js first, then .ts (ts-node dev mode)
+      const jsPath = srcPath
+        .replace(/\/src\//, "/dist/")
+        .replace(/\.tsx?$/, ".js");
+      debugLog.push(`trying require("${jsPath}") for ${info.className}`);
+      // eslint-disable-next-line @typescript-eslint/no-var-requires
+      const mod = require(jsPath) as Record<string, unknown>;
+      debugLog.push(
+        `  require succeeded, keys: ${Object.keys(mod).join(", ")}`,
+      );
+      const cls = mod[info.className];
+      debugLog.push(`  cls type: ${typeof cls}`);
+      if (typeof cls === "function") {
+        added.add(info.className);
+        dtoClasses.push(cls as new (...args: Array<unknown>) => unknown);
+        debugLog.push(`  ✅ added ${info.className}`);
+      } else {
+        debugLog.push(
+          `  ❌ ${info.className} not found in module (type=${typeof cls})`,
+        );
+      }
+    } catch (err: unknown) {
+      const msg = err instanceof Error ? err.message : String(err);
+      debugLog.push(`  ❌ require failed: ${msg}`);
+    }
+  }
+
+  // Write debug log to file in project root
+  try {
+    const fs = require("node:fs");
+    const path = require("node:path");
+    fs.writeFileSync(
+      path.resolve(process.cwd(), "pactify-debug.log"),
+      debugLog.join("\n") + "\n",
+      "utf-8",
+    );
+  } catch {
+    // ignore
   }
 
   // ── Create base Swagger document ──
   const doc = SwaggerModule.createDocument(app, config, {
     extraModels: dtoClasses,
   });
+
+  // ── Register error DTO schemas manually ──
+  // Error DTOs extend HttpException, which causes NestJS Swagger's
+  // SchemaObjectFactory to detect a circular dependency when walking
+  // the prototype chain into NestJS's own HttpException class.
+  // Instead, we build their schemas by instantiating each class and
+  // reading the default property values set by class field initializers.
+  if (tsExc) {
+    const httpExClass = tsExc.HttpException;
+    const httpExPrototype =
+      typeof httpExClass === "function"
+        ? (httpExClass as new (...a: unknown[]) => unknown).prototype
+        : null;
+
+    if (!doc.components) doc.components = {};
+    if (!doc.components.schemas) doc.components.schemas = {};
+
+    // Register ValidationErrorDto (referenced by error DTOs as errors: ValidationErrorDto[])
+    const ValidationErrorDtoClass = tsExc.ValidationErrorDto;
+    if (
+      typeof ValidationErrorDtoClass === "function" &&
+      !doc.components.schemas.ValidationErrorDto
+    ) {
+      doc.components.schemas.ValidationErrorDto = {
+        type: "object",
+        properties: {
+          property: {
+            type: "string",
+            description: "Property that failed validation",
+          },
+          messages: {
+            type: "array",
+            items: { type: "string" },
+            description: "Validation error messages",
+          },
+        },
+        required: ["messages"],
+      };
+    }
+
+    for (const [, info] of allDtos) {
+      // Skip DTOs already registered (success DTOs handled by extraModels)
+      if (doc.components.schemas[info.className]) continue;
+
+      const cls = tsExc[info.className];
+      if (typeof cls !== "function") continue;
+
+      // Only process error DTOs (those extending HttpException)
+      if (
+        !httpExPrototype ||
+        !Object.prototype.isPrototypeOf.call(
+          httpExPrototype,
+          (cls as new (...a: unknown[]) => unknown).prototype,
+        )
+      ) {
+        continue;
+      }
+
+      // Instantiate the error DTO to read its default field values.
+      // All error DTOs accept (errors?: ValidationErrorDto[] | string)
+      // and their constructors are safe to call with no arguments.
+      try {
+        // biome-ignore lint/suspicious/noExplicitAny: dynamic instantiation
+        const instance = new (cls as new (...a: any[]) => any)();
+
+        doc.components.schemas[info.className] = {
+          type: "object",
+          properties: {
+            statusCode: {
+              type: "number",
+              example: instance.statusCode,
+              description: "HTTP status code",
+            },
+            error: {
+              type: "string",
+              example: instance.error,
+              description: "Error name",
+            },
+            message: {
+              type: "string",
+              example: instance.message,
+              description: "Error message",
+            },
+            errors: {
+              type: "array",
+              items: { $ref: "#/components/schemas/ValidationErrorDto" },
+              description: "Additional error details",
+            },
+          },
+          required: ["statusCode", "error", "message"],
+        };
+      } catch {
+        logger.current.warn?.(
+          `pactify: failed to build schema for ${info.className}`,
+        );
+      }
+    }
+  }
 
   // ── Filter to versioned paths only ──
   const filteredPaths: Record<string, unknown> = {};
@@ -320,6 +497,37 @@ export const pactify = async (
       basePath,
       methodInfo.version,
     );
+  }
+
+  // ── Register missing application DTO schemas ────────────
+  // pactify emits $ref to DTOs like LoginResponseDto,
+  // PaginatedUsersDto etc. but those aren't in extraModels
+  // (they're app-specific, not from ts-exc). Automatically
+  // create a basic schema for any referenced but undefined DTO.
+  if (doc.components?.schemas) {
+    const schemas = doc.components.schemas as Record<string, unknown>;
+    const missing = new Set<string>();
+
+    // Walk all paths to collect $ref targets
+    function collectRefs(obj: unknown): void {
+      if (!obj || typeof obj !== "object") return;
+      if (Array.isArray(obj)) {
+        for (const item of obj) collectRefs(item);
+        return;
+      }
+      const record = obj as Record<string, unknown>;
+      if (typeof record.$ref === "string") {
+        const name = record.$ref.replace("#/components/schemas/", "");
+        if (!schemas[name]) missing.add(name);
+        return;
+      }
+      for (const val of Object.values(record)) collectRefs(val);
+    }
+    collectRefs(doc.paths);
+
+    for (const name of missing) {
+      schemas[name] = { type: "object" };
+    }
   }
 
   logger.current.log?.(`pactify: done in ${Date.now() - start}ms`);
