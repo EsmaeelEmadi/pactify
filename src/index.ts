@@ -260,10 +260,10 @@ export const pactify = async (
   );
 
   try {
-    tsExc = consumerRequire("@esmaeel_emadi/ts-exc") as Record<string, unknown>;
+    tsExc = consumerRequire("@wrk-t/ts-exc") as Record<string, unknown>;
   } catch {
     logger.current.warn?.(
-      "@esmaeel_emadi/ts-exc not found — install it for full Swagger schema support",
+      "@wrk-t/ts-exc not found — install it for full Swagger schema support",
     );
   }
 

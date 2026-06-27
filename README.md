@@ -1,4 +1,4 @@
-# @esmaeel_emadi/pactify
+# @wrk-t/pactify
 
 AST-powered Swagger/OpenAPI auto-generation for NestJS controllers.
 
@@ -9,7 +9,7 @@ return types, thrown exceptions, guard classes, and validation pipes — no manu
 ## Install
 
 ```bash
-pnpm add @esmaeel_emadi/pactify
+pnpm add @wrk-t/pactify
 ```
 
 Peer dependencies (your project should already have these):
@@ -23,7 +23,7 @@ Peer dependencies (your project should already have these):
 
 ```ts
 // main.ts
-import { pactify } from "@esmaeel_emadi/pactify";
+import { pactify } from "@wrk-t/pactify";
 import { DocumentBuilder, SwaggerModule } from "@nestjs/swagger";
 
 async function bootstrap() {
@@ -93,7 +93,7 @@ import {
   extractParamDecoratorThrows, // extract DTOs from pipe decorators
   extractDtoStatusCode,      // walk a DTO class AST to find its status code
   addDtosToSwagger,          // inject DTOs into Swagger paths
-} from "@esmaeel_emadi/pactify";
+} from "@wrk-t/pactify";
 ```
 
 ## License

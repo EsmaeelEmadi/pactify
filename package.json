@@ -1,12 +1,12 @@
 {
-  "name": "@esmaeel_emadi/pactify",
+  "name": "@wrk-t/pactify",
   "version": "0.2.1",
   "description": "AST-powered Swagger/OpenAPI auto-generation for NestJS controllers. Parses TypeScript source to extract DTOs, response types, and error types — no manual @ApiResponse decorators needed.",
   "license": "MIT",
   "author": "emadi68moh@gmail.com",
   "repository": {
     "type": "git",
-    "url": "https://github.com/EsmaeelEmadi/pactify"
+    "url": "https://github.com/wrk-t/pactify"
   },
   "main": "./dist/index.js",
   "types": "./dist/index.d.ts",
