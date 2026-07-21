@@ -1,9 +1,11 @@
 import { readFileSync } from "node:fs";
+import { relative } from "node:path";
 import type { INestApplication, LoggerService } from "@nestjs/common";
 import { type OpenAPIObject, SwaggerModule } from "@nestjs/swagger";
 import { parseSync } from "oxc-parser";
 import { walk } from "oxc-walker";
 import { addDtosToSwagger } from "./addDtosToSwagger";
+import { type PactifyCacheEntry, loadCache, saveCache } from "./cache";
 import { checkIsController } from "./checkIsController";
 import { HTTP_METHODS, logger } from "./constants";
 import { extractDecoratorThrows } from "./extractDecoratorThrows";
@@ -11,6 +13,7 @@ import { extractMethodDtos } from "./extractMethodDtos";
 import { extractParamDecoratorThrows } from "./extractParamDecoratorThrows";
 import { findControllerFiles } from "./findControllerFiles";
 import { getApiVersion } from "./getApiVersion";
+import { hashFile } from "./hash";
 
 // ────────────────────────────────────────────────────────────
 // Helpers
@@ -38,6 +41,24 @@ export interface PactifyOptions {
    * Pass a NestJS Logger instance for structured logging.
    */
   logger?: LoggerService | Console;
+
+  /**
+   * Enable file-hash-based caching so that only controllers whose source
+   * files changed since the last run are re-parsed.
+   *
+   * Set to `true` to use the default cache directory (".pactify-cache"),
+   * or pass a string path for a custom location.
+   *
+   * The cache stores the extracted route metadata per controller, keyed
+   * by a SHA256 hash of the controller file.  On subsequent runs, a hash
+   * match means the controller is skipped — no AST parse, no walk.
+   *
+   * Combined with git-based change detection (only changed files differ
+   * from cache), this makes incremental dev-server restarts near-instant.
+   *
+   * @default false
+   */
+  cache?: boolean | string;
 }
 
 // ────────────────────────────────────────────────────────────
@@ -102,7 +123,53 @@ export const pactify = async (
 
   logger.current.debug?.(`Found ${controllerFiles.length} controller file(s)`);
 
+  // ── Cache: resolve cache dir & load existing entries ──
+  const cacheEnabled = !!opts?.cache;
+  const cacheDir =
+    typeof opts?.cache === "string" ? opts.cache : ".pactify-cache";
+  const existingCache = cacheEnabled ? loadCache(cacheDir) : null;
+  const newCacheEntries: Record<string, PactifyCacheEntry> = {};
+  let cacheHits = 0;
+  let cacheMisses = 0;
+
+  // Shared vars populated by the parsing walk (used for cache entry creation)
+  let currentControllerName = "";
+  let currentControllerBasePath = "";
+
   for (const controllerPath of controllerFiles) {
+    const cacheKey = relative(process.cwd(), controllerPath);
+
+    // ── Cache hit: replay cached data into global accumulators ──
+    const fileHash = hashFile(controllerPath);
+
+    if (existingCache?.[cacheKey]?.hash === fileHash) {
+      const cached = existingCache[cacheKey];
+      cacheHits++;
+      logger.current.debug?.(`pactify cache hit: ${cacheKey}`);
+
+      // Replay cached pathMethods (route metadata)
+      for (const pm of cached.data.pathMethods) {
+        pathMethods.push(pm);
+      }
+
+      // Replay cached DTOs into allDtos (nested DTOs already included
+      // because newDtos was collected from allDtos after the parse walk)
+      for (const dto of cached.data.dtos) {
+        allDtos.set(dto.className, dto);
+      }
+
+      // Carry forward to new cache
+      newCacheEntries[cacheKey] = cached;
+      continue;
+    }
+
+    // ── Cache miss: parse from scratch ──
+    cacheMisses++;
+    logger.current.debug?.(`pactify cache miss: ${cacheKey}`);
+
+    const pmBefore = pathMethods.length;
+    const dtoKeysBefore = new Set(allDtos.keys());
+
     const controllerContent = readFileSync(controllerPath, "utf-8");
     const ast = parseSync(controllerPath, controllerContent);
     const program = ast.program;
@@ -113,11 +180,11 @@ export const pactify = async (
           const isCtrl = checkIsController(node);
           if (!isCtrl) return;
 
-          const controllerName = node.id.name;
-          const controllerBasePath = parseControllerBasePath(node);
+          currentControllerName = node.id.name;
+          currentControllerBasePath = parseControllerBasePath(node);
 
           logger.current.debug?.(
-            `Found controller "${controllerName}" with base path "${controllerBasePath}"`,
+            `Found controller "${currentControllerName}" with base path "${currentControllerBasePath}"`,
           );
 
           walk(node.body, {
@@ -228,7 +295,10 @@ export const pactify = async (
                   }
 
                   const fullPath =
-                    `/${controllerBasePath}/${methodPath}`.replace(/\/+/g, "/");
+                    `/${currentControllerBasePath}/${methodPath}`.replace(
+                      /\/+/g,
+                      "/",
+                    );
                   pathMethods.push({
                     version,
                     path: fullPath,
@@ -242,6 +312,33 @@ export const pactify = async (
         }
       },
     });
+
+    // ── Record cache entry for this controller ──
+    const newPathMethods = pathMethods.slice(pmBefore);
+    const newDtos: Array<{ className: string; filePath: string }> = [];
+    for (const [key, val] of allDtos) {
+      if (!dtoKeysBefore.has(key)) {
+        newDtos.push(val);
+      }
+    }
+
+    newCacheEntries[cacheKey] = {
+      hash: fileHash,
+      data: {
+        controllerName: currentControllerName,
+        controllerBasePath: currentControllerBasePath,
+        pathMethods: newPathMethods,
+        dtos: newDtos,
+      },
+    };
+  }
+
+  // ── Persist cache ──
+  if (cacheEnabled) {
+    saveCache(cacheDir, newCacheEntries, controllerFiles);
+    logger.current.log?.(
+      `pactify cache: ${cacheHits} hit(s), ${cacheMisses} miss(es)`,
+    );
   }
 
   logger.current.debug?.(`Found ${allDtos.size} unique DTO(s)`);
@@ -544,3 +641,12 @@ export { extractDecoratorThrows } from "./extractDecoratorThrows";
 export { extractParamDecoratorThrows } from "./extractParamDecoratorThrows";
 export { extractDtoStatusCode } from "./extractDtoStatusCode";
 export { addDtosToSwagger } from "./addDtosToSwagger";
+export {
+  type PactifyCacheEntry,
+  type CachedMethod,
+  type CachedControllerData,
+  loadCache,
+  saveCache,
+  clearCache,
+} from "./cache";
+export { hashFile } from "./hash";

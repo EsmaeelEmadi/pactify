@@ -1,4 +1,54 @@
 import { HttpStatus } from "@nestjs/common";
+import { readFileSync } from "node:fs";
+
+/**
+ * Build an inline OpenAPI schema for a paginated response wrapper.
+ *
+ * Paginated*Dto classes extend `PaginatedDto<InnerDto>` but NestJS
+ * Swagger can't resolve the generic type parameter, leaving `data`
+ * typed as `string[]` and `limit`/`totalPages` as empty objects.
+ * We generate the correct schema here.
+ */
+function buildPaginatedSchema(innerRef: string) {
+  return {
+    type: "object",
+    properties: {
+      data: {
+        type: "array",
+        items: { $ref: `#/components/schemas/${innerRef}` },
+      },
+      total: { type: "number" },
+      page: { type: "number" },
+      limit: { type: "number", nullable: true },
+      totalPages: { type: "number", nullable: true },
+    },
+    required: ["data", "total", "page"],
+  };
+}
+
+/**
+ * Parse a Paginated*Dto source file to extract its inner generic type.
+ *
+ * @example
+ *   class PaginatedUsersDto extends PaginatedDto<ExtendedUserDto> { ... }
+ *   → "ExtendedUserDto"
+ */
+function extractPaginatedInnerType(
+  filePath: string,
+  className: string,
+): string | null {
+  try {
+    const content = readFileSync(filePath, "utf-8");
+    // Match `extends PaginatedDto<InnerType>`
+    const regex = new RegExp(
+      `class\\s+${className}\\s+extends\\s+PaginatedDto\\s*<\\s*(\\w+)\\s*>`,
+    );
+    const match = content.match(regex);
+    return match ? match[1] : null;
+  } catch {
+    return null;
+  }
+}
 
 /**
  * Add extracted DTOs as response schemas on a Swagger path+method.
@@ -62,27 +112,56 @@ export const addDtosToSwagger = (
 		if (dto.nestedDtos && dto.nestedDtos.length > 0) {
 			const nestedDto = dto.nestedDtos[0];
 
-			responses[statusCode] = {
-				description: `${dto.className}<${nestedDto.className}>`,
-				content: {
-					"application/json": {
-						schema: {
-							allOf: [
-								{ $ref: `#/components/schemas/${dto.className}` },
-								{
-									type: "object",
-									properties: {
-										data: {
-											$ref: `#/components/schemas/${nestedDto.className}`,
-										},
+			// Paginated response — generate inline schema with correct inner type
+			if (nestedDto.className.startsWith("Paginated")) {
+				const innerType = extractPaginatedInnerType(
+					nestedDto.filePath,
+					nestedDto.className,
+				);
+				const dataSchema = innerType
+					? buildPaginatedSchema(innerType)
+					: { $ref: `#/components/schemas/${nestedDto.className}` };
+
+				responses[statusCode] = {
+					description: `${dto.className}<${nestedDto.className}>`,
+					content: {
+						"application/json": {
+							schema: {
+								allOf: [
+									{ $ref: `#/components/schemas/${dto.className}` },
+									{
+										type: "object",
+										properties: { data: dataSchema },
+										required: ["data"],
 									},
-									required: ["data"],
-								},
-							],
+								],
+							},
 						},
 					},
-				},
-			};
+				};
+			} else {
+				responses[statusCode] = {
+					description: `${dto.className}<${nestedDto.className}>`,
+					content: {
+						"application/json": {
+							schema: {
+								allOf: [
+									{ $ref: `#/components/schemas/${dto.className}` },
+									{
+										type: "object",
+										properties: {
+											data: {
+												$ref: `#/components/schemas/${nestedDto.className}`,
+											},
+										},
+										required: ["data"],
+									},
+								],
+							},
+						},
+					},
+				};
+			}
 		} else {
 			responses[statusCode] = {
 				description: dto.className,

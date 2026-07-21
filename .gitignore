@@ -24,5 +24,8 @@ npm-debug.log*
 .DS_Store
 Thumbs.db
 
+# Cache
+.pactify-cache/
+
 # Package
 *.tgz
