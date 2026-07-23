@@ -421,14 +421,15 @@ export const pactify = async (
     try {
       // Application DTOs: resolve from the compiled dist/ directory.
       // In production the backend runs from dist/, not src/.
-      const srcPath = require("node:path").resolve(
+      const path = require("node:path");
+      const srcPath = path.resolve(process.cwd(), info.filePath);
+      // Cross-platform: replace leading "src/" or "src\" with "dist/" or "dist\"
+      const relToCwd = path.relative(process.cwd(), srcPath);
+      const distRel = relToCwd.replace(/^src(?=[\\/])/, "dist");
+      const jsPath = path.resolve(
         process.cwd(),
-        info.filePath,
+        distRel.replace(/\.tsx?$/, ".js"),
       );
-      // Try compiled .js first, then .ts (ts-node dev mode)
-      const jsPath = srcPath
-        .replace(/\/src\//, "/dist/")
-        .replace(/\.tsx?$/, ".js");
       debugLog.push(`trying require("${jsPath}") for ${info.className}`);
       // eslint-disable-next-line @typescript-eslint/no-var-requires
       const mod = require(jsPath) as Record<string, unknown>;
