@@ -42,19 +42,61 @@ const analyzeMethodForDtos = (
       if (node.type === "ArrowFunctionExpression" && node.expression === true) {
         const nestedDtos: string[] = [];
 
-        // @ts-expect-error AST node type narrowing (arrow expression body)
-        if (Array.isArray(node.body?.arguments)) {
-          // @ts-expect-error AST node type narrowing
-          for (const arg of node.body.arguments) {
-            if (
-              arg.type === "NewExpression" &&
-              arg.callee.type === "Identifier" &&
-              arg.callee.name.endsWith("Dto")
-            ) {
-              nestedDtos.push(arg.callee.name);
-            }
-          }
-        }
+	        // @ts-expect-error AST node type narrowing (arrow expression body)
+	        if (Array.isArray(node.body?.arguments)) {
+	          // @ts-expect-error AST node type narrowing
+	          for (const arg of node.body.arguments) {
+	            if (
+	              arg.type === "NewExpression" &&
+	              arg.callee.type === "Identifier" &&
+	              arg.callee.name.endsWith("Dto")
+	            ) {
+	              nestedDtos.push(arg.callee.name);
+	            }
+	            // Extract DTOs from array arguments
+	            if (arg.type === "ArrayExpression") {
+	              for (const elem of arg.elements) {
+	                if (
+	                  elem?.type === "NewExpression" &&
+	                  elem.callee?.type === "Identifier" &&
+	                  elem.callee.name.endsWith("Dto")
+	                ) {
+	                  nestedDtos.push("[]" + elem.callee.name);
+	                }
+	              }
+	            }
+	            // Extract DTOs from array method calls with inline callbacks
+	            if (
+	              arg.type === "CallExpression" &&
+	              arg.callee?.type === "MemberExpression" &&
+	              arg.callee.property?.type === "Identifier"
+	            ) {
+	              const methodName = arg.callee.property.name;
+	              if (
+	                ["map", "filter", "forEach", "find", "flatMap"].includes(methodName) &&
+	                arg.arguments.length > 0 &&
+	                (arg.arguments[0].type === "ArrowFunctionExpression" ||
+	                  arg.arguments[0].type === "FunctionExpression")
+	              ) {
+	                const cb = arg.arguments[0];
+	                
+	                if (cb.body) {
+	                  walk(cb.body, {
+	                    enter(cbNode) {
+	                      if (
+	                        cbNode.type === "NewExpression" &&
+	                        cbNode.callee?.type === "Identifier" &&
+	                        cbNode.callee.name.endsWith("Dto")
+	                      ) {
+	                        nestedDtos.push("[]" + cbNode.callee.name);
+	                      }
+	                    },
+	                  });
+	                }
+	              }
+	            }
+	          }
+	        }
 
         if (!dtoImportsCache.has(sourceFilePath)) {
           const fileImports = new Map<string, string>();
@@ -104,24 +146,67 @@ const analyzeMethodForDtos = (
         }
       }
 
-      // Return / Throw statements with `new XxxDto()`
-      if (
-        (node.type === "ReturnStatement" || node.type === "ThrowStatement") &&
-        node.argument?.type === "NewExpression" &&
-        node.argument.callee.type === "Identifier" &&
-        node.argument.callee.name.endsWith("Dto")
-      ) {
-        const nestedDtos: string[] = [];
+	      // Return / Throw statements with `new XxxDto()`
+	      if (
+	        (node.type === "ReturnStatement" || node.type === "ThrowStatement") &&
+	        node.argument?.type === "NewExpression" &&
+	        node.argument.callee.type === "Identifier" &&
+	        node.argument.callee.name.endsWith("Dto")
+	      ) {
+	        const nestedDtos: string[] = [];
 
-        for (const arg of node.argument.arguments) {
-          if (
-            arg.type === "NewExpression" &&
-            arg.callee.type === "Identifier" &&
-            arg.callee.name.endsWith("Dto")
-          ) {
-            nestedDtos.push(arg.callee.name);
-          }
-        }
+	        for (const arg of node.argument.arguments) {
+	          if (
+	            arg.type === "NewExpression" &&
+	            arg.callee.type === "Identifier" &&
+	            arg.callee.name.endsWith("Dto")
+	          ) {
+	            nestedDtos.push(arg.callee.name);
+	          }
+	          // Extract DTOs from array arguments — e.g. new OkDto([new XDto(a), new XDto(b)])
+	          if (arg.type === "ArrayExpression") {
+	            for (const elem of arg.elements) {
+	              if (
+	                elem?.type === "NewExpression" &&
+	                elem.callee?.type === "Identifier" &&
+	                elem.callee.name.endsWith("Dto")
+	              ) {
+	                nestedDtos.push("[]" + elem.callee.name);
+	              }
+	            }
+	          }
+	          // Extract DTOs from array method calls with inline callbacks
+	          // e.g. new OkDto(tenants.map((t) => new TenantDto(t)))
+	          if (
+	            arg.type === "CallExpression" &&
+	            arg.callee?.type === "MemberExpression" &&
+	            arg.callee.property?.type === "Identifier"
+	          ) {
+	            const methodName = arg.callee.property.name;
+	            if (
+	              ["map", "filter", "forEach", "find", "flatMap"].includes(methodName) &&
+	              arg.arguments.length > 0 &&
+	              (arg.arguments[0].type === "ArrowFunctionExpression" ||
+	                arg.arguments[0].type === "FunctionExpression")
+	            ) {
+	              const cb = arg.arguments[0];
+	              
+	              if (cb.body) {
+	                walk(cb.body, {
+	                  enter(cbNode) {
+	                    if (
+	                      cbNode.type === "NewExpression" &&
+	                      cbNode.callee?.type === "Identifier" &&
+	                      cbNode.callee.name.endsWith("Dto")
+	                    ) {
+	                      nestedDtos.push("[]" + cbNode.callee.name);
+	                    }
+	                  },
+	                });
+	              }
+	            }
+	          }
+	        }
 
         if (!dtoImportsCache.has(sourceFilePath)) {
           const fileImports = new Map<string, string>();
@@ -201,11 +286,41 @@ const analyzeMethodForDtos = (
           }
         }
 
-        if (!functionName) {
-          return;
-        }
+	        if (!functionName) {
+	          return;
+	        }
 
-        let targetFile = sourceFilePath;
+	        // ── Array methods with inline callbacks (map, filter, etc.) ──
+	        // Trace into the callback to extract nested DTOs.
+	        // e.g. tenants.map((t) => new TenantDto(t))
+	        const ARRAY_METHODS = ["map", "filter", "forEach", "find", "flatMap"];
+	        if (
+	          ARRAY_METHODS.includes(functionName) &&
+	          callExpr.arguments.length > 0 &&
+	          (callExpr.arguments[0].type === "ArrowFunctionExpression" ||
+	            callExpr.arguments[0].type === "FunctionExpression")
+	        ) {
+	          const cb = callExpr.arguments[0];
+	          if (cb.body) {
+	            walk(cb.body, {
+	            enter(cbNode) {
+	              if (
+	                cbNode.type === "NewExpression" &&
+	                cbNode.callee?.type === "Identifier" &&
+	                cbNode.callee.name.endsWith("Dto")
+	              ) {
+	                dtos.push({
+	                  className: cbNode.callee.name,
+	                  filePath: sourceFilePath,
+	                  type: "return",
+	                });
+	              }
+	            },
+	          });
+	          }
+	        }
+
+	        let targetFile = sourceFilePath;
 
         // ── Resolve super.method() calls to the base class ──
         if (isSuperCall) {
@@ -551,18 +666,21 @@ export const extractMethodDtos = (
     dtoImportsCache,
   );
 
-  // Transform nestedDtos from string[] to resolved objects with file paths
-  for (const dto of dtos) {
-    if (
-      dto.nestedDtos &&
-      dto.nestedDtos.length > 0 &&
-      typeof dto.nestedDtos[0] === "string"
-    ) {
-      const rawNested = dto.nestedDtos as unknown as string[];
-      const resolved = rawNested
-        .map((name: string) => {
-          const fp = dtoImports.get(name);
-          return fp ? { className: name, filePath: fp } : null;
+  	// Transform nestedDtos from string[] to resolved objects with file paths
+  	for (const dto of dtos) {
+  		if (
+  			dto.nestedDtos &&
+  			dto.nestedDtos.length > 0 &&
+  			typeof dto.nestedDtos[0] === "string"
+  		) {
+  			const rawNested = dto.nestedDtos as unknown as string[];
+  			const resolved = rawNested
+  				.map((name: string) => {
+  					// Strip "[]" prefix (marks array-extracted DTOs) before import lookup
+  					const lookupName = name.startsWith("[]") ? name.slice(2) : name;
+  					const fp = dtoImports.get(lookupName);
+  					// Preserve the prefix in the result so addDtosToSwagger can detect it
+  					return fp ? { className: name, filePath: fp } : null;
         })
         .filter(
           (x): x is { className: string; filePath: string } => x !== null,
