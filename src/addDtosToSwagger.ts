@@ -112,8 +112,33 @@ export const addDtosToSwagger = (
 		if (dto.nestedDtos && dto.nestedDtos.length > 0) {
 			const nestedDto = dto.nestedDtos[0];
 
+			// Array-wrapped DTOs — prefix "[]" marks extraction from array literal or .map()
+			if (nestedDto.className.startsWith("[]")) {
+				const innerRef = nestedDto.className.slice(2);
+				responses[statusCode] = {
+					description: `${dto.className}<${innerRef}[]>`,
+					content: {
+						"application/json": {
+							schema: {
+								allOf: [
+									{ $ref: `#/components/schemas/${dto.className}` },
+									{
+										type: "object",
+										properties: {
+											data: {
+												type: "array",
+												items: { $ref: `#/components/schemas/${innerRef}` },
+											},
+										},
+										required: ["data"],
+									},
+								],
+							},
+						},
+					},
+				};
 			// Paginated response — generate inline schema with correct inner type
-			if (nestedDto.className.startsWith("Paginated")) {
+			} else if (nestedDto.className.startsWith("Paginated")) {
 				const innerType = extractPaginatedInnerType(
 					nestedDto.filePath,
 					nestedDto.className,
