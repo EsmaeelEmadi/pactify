@@ -199,10 +199,15 @@ export const addDtosToSwagger = (
 		}
 	}
 
-	// For GET methods, add a 304 Not Modified response with the same schema as 200
-	if (method === "get" && responses[200]) {
-		const content304 = JSON.parse(JSON.stringify(responses[200].content));
-		const schema304 = content304["application/json"].schema;
+	// For GET methods, add a 304 Not Modified response with the same schema as 200.
+	// Skip when the 200 response has no JSON content (e.g. raw @Res() endpoints
+	// like file/stream or image responses).
+	if (method === "get" && responses[200]?.content?.["application/json"]) {
+		const content304 = JSON.parse(
+			JSON.stringify(responses[200].content["application/json"]),
+		);
+		const schema304 = content304.schema;
+		if (!schema304) return;
 
 		const statusCodeOverride = {
 			type: "object",
@@ -223,7 +228,7 @@ export const addDtosToSwagger = (
 
 		responses[304] = {
 			description: "Not Modified",
-			content: content304,
+			content: { "application/json": content304 },
 		};
 	}
 };
